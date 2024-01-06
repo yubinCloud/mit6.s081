@@ -13,8 +13,8 @@ int
 main(int argc, char *argv[])
 {
     int fds1[2], fds2[2], n, p, xstatus, pid;
-    int *left_fds = fds1;
-    int *right_fds = fds2;
+    int *left_fds = fds1;  // 左通道
+    int *right_fds = fds2; // 右通道
     if (pipe(left_fds) != 0 || pipe(right_fds) != 0) {
         printf("pipe() failed\n");
         exit(1);

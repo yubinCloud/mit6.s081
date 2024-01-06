@@ -72,12 +72,6 @@ main(int argc, char *argv[])
         if (flag == 0 && argnum == arg_num_init) {
             exit(0);
         }
-        // int i = 0;
-        // while (args[i] != 0) {
-            // printf("arg: %s  ", args[i]);
-            // i++;
-        // }
-        // printf("\n");
         pid = fork();
         if (pid == 0) {
             exec(command, args);
