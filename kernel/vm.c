@@ -15,6 +15,42 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+void print_pte(int index, pte_t pte, uint64 pa, int level) {
+  for (int j = level; j > 0; j--) {
+    if (j != 1) {
+      printf(".. ");
+    } else {
+        printf("..");
+    }
+  }
+  printf("%d: pte %p pa %p\n", index, pte, pa);
+}
+
+void display_pt(pagetable_t pagetable, int level) {
+  static const int PTE_NUMBERS = 512;  // 每个 page 的 PTE 数量
+  for (int i = 0; i < PTE_NUMBERS; i++) {
+    pte_t pte = pagetable[i];
+    if ((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+      uint64 child = PTE2PA(pte);
+      print_pte(i, pte, child, level);
+      display_pt((pagetable_t) child, level + 1);
+    } else if (pte & PTE_V) {
+      print_pte(i, pte, PTE2PA(pte), level);
+    }
+  }
+}
+
+/**
+ * display the page table
+ */
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  display_pt(pagetable, 1);
+}
+
+
 /*
  * create a direct-map page table for the kernel.
  */
