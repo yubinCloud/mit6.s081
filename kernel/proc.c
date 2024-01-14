@@ -19,6 +19,7 @@ extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
+extern char etext[]; // kernel.ld sets this to end of kernel code.
 extern char trampoline[]; // trampoline.S
 
 // initialize the proc table at boot time.
@@ -30,16 +31,6 @@ procinit(void)
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
-
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
   }
   kvminithart();
 }
@@ -121,6 +112,17 @@ found:
     return 0;
   }
 
+  // An kernel table page
+  p->kpt = make_kernel_pagetable();
+
+  // 给 kernel page table 添加一个指向 process's kernel stack 的 mapping
+  char *kernel_stack_pa = kalloc();
+  if (kernel_stack_pa == 0)
+    panic("kalloc");
+  uint64 kernel_stack_va = KSTACK((int) (p - proc));  // 根据这个进程在 proc table 中的序号获取这个进程对应 kernel stack 的 VA
+  vmmap(p->kpt, kernel_stack_va, (uint64) kernel_stack_pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = kernel_stack_va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -141,6 +143,16 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  
+  // 释放 kernel stack
+  if(p->kstack) {
+    uvmunmap(p->kpt, p->kstack, 1, 1);
+    p->kstack = 0;
+  }
+  // 释放 kernel page table
+  if(p->kpt)
+    proc_free_kernel_pagetable(p->kpt);
+
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -193,6 +205,24 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
+}
+
+// 模仿 proc_freepagetable 函数，释放一个 kernel page table
+void
+proc_free_kernel_pagetable(pagetable_t kpt)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = kpt[i];
+
+    if ((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0) {  // 非 leaf page
+      uint64 child = PTE2PA(pte);
+      proc_free_kernel_pagetable((pagetable_t) child);
+      kpt[i] = 0;
+    } else if (pte & PTE_V) {  // 如果是 leaf physical memory page，则跳过不 free
+      continue;
+    }
+  }
+  kfree((void*)kpt);
 }
 
 // a user program that calls exec("/init")
@@ -473,7 +503,10 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        
+        vminithart(p->kpt);   // 将 process's kernel page table 加载到 SATP 寄存器中
         swtch(&c->context, &p->context);
+        kvminithart();        // 重新使用全局的 kernel_pagetable
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
