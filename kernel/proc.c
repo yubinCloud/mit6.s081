@@ -21,7 +21,6 @@ static void freeproc(struct proc *p);
 
 extern char etext[]; // kernel.ld sets this to end of kernel code.
 extern char trampoline[]; // trampoline.S
-
 // initialize the proc table at boot time.
 void
 procinit(void)
@@ -150,8 +149,10 @@ freeproc(struct proc *p)
     p->kstack = 0;
   }
   // 释放 kernel page table
-  if(p->kpt)
+  if(p->kpt) {
     proc_free_kernel_pagetable(p->kpt);
+    p->kpt = 0;
+  }
 
   p->pagetable = 0;
   p->sz = 0;
