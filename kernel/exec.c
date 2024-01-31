@@ -51,6 +51,9 @@ exec(char *path, char **argv)
     uint64 sz1;
     if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
       goto bad;
+    if(sz1 >= PLIC) {
+      goto bad;
+    }
     sz = sz1;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
@@ -115,6 +118,16 @@ exec(char *path, char **argv)
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
+
+  // 删除内核页表中记录的旧用户态页表的 mappings
+  uvmunmap(p->kpt, 0, PGROUNDUP(oldsz) / PGSIZE, 0);
+  // 将新 user process page table 的 mapping 复制到 kernel page table 中
+  pte_t *pte, *kpte;
+  for (int j = 0; j < sz; j += PGSIZE) {
+    pte = walk(pagetable, j, 0);
+    kpte = walk(p->kpt, j, 1);
+    *kpte = (*pte) & (~PTE_U);
+  }
 
   if (p->pid == 1) {
     vmprint(p->pagetable);

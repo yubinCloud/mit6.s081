@@ -252,6 +252,12 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  // 将 process page table 的 mapping 复制到 process's kernel page table
+  pte_t *pte, *kpte;
+  pte = walk(p->pagetable, 0, 0);
+  kpte = walk(p->kpt, 0, 1);
+  *kpte = (*pte) & ~PTE_U;  // 将 PTE 中的 PTE_U flag 置为 0
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -307,6 +313,14 @@ fork(void)
   np->sz = p->sz;
 
   np->parent = p;
+  
+  // Copy process page table -> kernel page table
+  pte_t *pte, *kpt;
+  for (uint64 j = 0; j < p->sz; j += PGSIZE) {
+    pte = walk(np->pagetable, j, 0);
+    kpt = walk(np->kpt, j, 1);
+    *kpt = (*pte) & (~PTE_U);
+  }
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);

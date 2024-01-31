@@ -46,9 +46,31 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
+  struct proc *p = myproc();
+  addr = p->sz;
+
+  // 检查 user process 的内存是否超过了 PLIC
+  if (addr + n >= PLIC) {
+    return -1;
+  }
+
   if(growproc(n) < 0)
     return -1;
+
+  if (n > 0) {
+    // 将 sbrk 扩张的内存的 mapping 复制到 kernel page table
+    pte_t *pte, *kpte;
+    for (int j = addr; j < addr + n; j += PGSIZE) {
+      pte = walk(p->pagetable, j, 0);
+      kpte = walk(p->kpt, j, 1);
+      *kpte = (*pte) & (~PTE_U);
+    }
+  } else if (n < 0) {
+    for (int j = addr - PGSIZE; j >= addr + n; j -= PGSIZE) {
+      uvmunmap(p->kpt, j, 1, 0);
+    }
+  }
+  
   return addr;
 }
 
