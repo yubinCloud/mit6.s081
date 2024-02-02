@@ -108,4 +108,6 @@ struct proc {
   uint64 alarm_callback;
   uint64 alarm_interval;
   uint64 passed_ticks;
+  int is_running_callback;   // 指示当前用户程序是否正在运行 alarm callback 程序
+  struct trapframe interupted_trapframe;  // 用于保存因需要执行 alarm_callback 而保存的 trapframe
 };

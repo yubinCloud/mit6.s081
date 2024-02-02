@@ -130,6 +130,8 @@ found:
   // initilize fields for alarm syscalls
   p->alarm_callback = 0;
   p->alarm_interval = 0;
+  p->passed_ticks = 0;
+  p->is_running_callback = 0;
 
   return p;
 }

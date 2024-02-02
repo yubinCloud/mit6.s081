@@ -78,12 +78,14 @@ usertrap(void)
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2) {
-    if (p->alarm_interval >= 0) {
-      p->passed_ticks++;
-      if (p->passed_ticks >= p->alarm_interval) {
+    if (p->alarm_interval > 0) {
+      if (p->passed_ticks >= p->alarm_interval && p->is_running_callback == 0) {  // 超时且没有在运行 callback
         p->passed_ticks = 0;
-        p->trapframe->epc = p->alarm_callback;
+        p->is_running_callback = 1;
+        p->interupted_trapframe = *(p->trapframe);  // 保存各寄存器的值，便于之后在用户空间中恢复
+        p->trapframe->epc = p->alarm_callback;  // 返回用户空间时，PC 值就变成了 alarm callback 的地址
       }
+      p->passed_ticks++;
     }
     yield();
   }
