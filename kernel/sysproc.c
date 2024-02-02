@@ -123,7 +123,7 @@ sys_sigreturn(void)
   struct proc *p = myproc();
   p->is_running_callback = 0;
   p->passed_ticks = 0;
-  *(p->trapframe) = p->interupted_trapframe;
+  *(p->trapframe) = p->interupted_trapframe;  // 用户正常程序的所有寄存器值
 
   return 0;
 }
