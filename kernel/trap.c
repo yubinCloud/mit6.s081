@@ -14,6 +14,8 @@ extern char trampoline[], uservec[], userret[];
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
 
+void page_fault_handler(struct proc *p);
+
 extern int devintr();
 
 void
@@ -67,6 +69,8 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13 || r_scause() == 15) {  // page fault
+    page_fault_handler(p);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
@@ -82,6 +86,23 @@ usertrap(void)
 
   usertrapret();
 }
+
+//
+// handle page fault
+//
+void 
+page_fault_handler(struct proc * const p)
+{
+  uint64 va = r_stval();
+  if (p->sz <= va || va < p->trapframe->sp) {  // 如果 va 高于 sbrk 申请的地址或者低于栈顶地址
+    p->killed = 1;
+  } else {
+    if (alloc_memory_page(va, p->pagetable) == 0) {  // 当分配内存或添加 mapping 失败，就直接杀死该进程
+      p->killed = 1;
+    }
+  }
+}
+
 
 //
 // return to user space

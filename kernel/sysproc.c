@@ -46,9 +46,22 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  struct proc *p = myproc();
+  addr = p->sz;
+  uint64 newSz = addr + n;  // 变更后 p->sz 应该的值
+  if (newSz >= MAXVA) {  // 扩大地超出了 MAXVA
+    return addr;
+  }
+  // 当传给 sbrk 的参数为负数时
+  if (n < 0) {
+    if (newSz > addr) {  // 溢出时
+      newSz = 0;
+      uvmunmap(p->pagetable, 0, PGROUNDUP(addr) / PGSIZE, 1);
+    } else {  // 未溢出时
+      uvmunmap(p->pagetable, PGROUNDUP(newSz), (PGROUNDUP(addr) - PGROUNDUP(newSz)) / PGSIZE, 1);
+    }
+  }
+  p->sz = newSz;
   return addr;
 }
 
