@@ -311,22 +311,30 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
+  for (i = 0; i < sz; i += PGSIZE) {
+    if ((pte = walk(old, i, 0)) == 0) {
       panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
+    }
+    if ((*pte & PTE_V) == 0) {
       panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    }
+    
+    pa = PTE2PA(*pte);  // 物理地址
+    flags = PTE_FLAGS(*pte);  // PTE flags
+
+    // 仅对可写页面设置 COW 的标记
+    if (flags & PTE_W) {
+      flags |= PTE_COW;  // 设置 COW 标记
+      flags &= ~PTE_W;  // 清除 W 标记
+      *pte = PA2PTE(pa) | flags;  // 更新 PTE
+    }
+
+    // 子进程页表中的 PTE 权限也是 flags
+    if (mappages(new, i, PGSIZE, pa, flags) != 0) {
       goto err;
     }
+    kref_inc(pa);  // 增加引用计数
   }
   return 0;
 
@@ -359,6 +367,12 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
+
+    // 检测 COW 并处理
+    if (is_cowpage(pagetable, va0) == 1) {
+      pa0 = (uint64) handle_cow(pagetable, va0);  // 如果是 COW，则更换 pa0
+    }
+
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);

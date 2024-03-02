@@ -20,6 +20,11 @@ struct run {
 
 struct {
   struct spinlock lock;
+  int counts[PHYSTOP / PGSIZE];
+} kref;
+
+struct {
+  struct spinlock lock;
   struct run *freelist;
 } kmem;
 
@@ -27,6 +32,7 @@ void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&kref.lock, "kref");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +41,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    kref.counts[(uint64)p / PGSIZE] = 1;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -50,6 +58,14 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // 减少 ref count，当 ref count 为 0 时才释放物理内存
+  acquire(&kref.lock);
+  if (--kref.counts[(uint64)pa / PGSIZE] > 0) {
+    release(&kref.lock);
+    return;
+  }
+  release(&kref.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -72,11 +88,45 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r) {
     kmem.freelist = r->next;
+    // 新分配的 page 的 ref count 置为 1
+    acquire(&kref.lock);
+    kref.counts[(uint64)r / PGSIZE] = 1;
+    release(&kref.lock);
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+// 增加对某个物理地址的引用计数
+void
+kref_inc(uint64 pa)
+{
+  acquire(&kref.lock);
+  kref.counts[pa / PGSIZE]++;
+  release(&kref.lock);
+}
+
+// 减少对某个物理地址的引用计数
+void
+kref_dec(uint64 pa)
+{
+  acquire(&kref.lock);
+  kref.counts[pa / PGSIZE]--;
+  release(&kref.lock);
+}
+
+// 获取某个物理地址的引用计数
+int
+kref_count(uint64 pa)
+{
+  int count;
+  acquire(&kref.lock);
+  count = kref.counts[pa / PGSIZE];
+  release(&kref.lock);
+  return count;
 }

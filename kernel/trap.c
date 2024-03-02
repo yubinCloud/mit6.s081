@@ -29,6 +29,54 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+// 判断是否为 cow page
+// 是的话返回 1，否则返回 0
+int is_cowpage(pagetable_t pagetable, uint64 va){
+  if (va >= MAXVA)
+    return 0;
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return 0;
+  if ((*pte & PTE_V) == 0)
+    return 0;
+  return (*pte & PTE_COW) != 0;
+}
+
+void* handle_cow(pagetable_t pagetable, uint64 va){
+  va = PGROUNDDOWN(va);
+
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return 0;
+
+  uint64 pa = PTE2PA(*pte);
+  if (pa == 0)
+    return 0;
+
+  // 根据 ref count 判断是否需要分配新的物理页
+  if (kref_count(pa) == 1) {
+    // 如果只存在一个引用，则直接修改 PTE 的 flags 并返回即可
+    *pte |= PTE_W;  // 增加 PTE 的写权限
+    *pte &= ~PTE_COW;  // 清除 PTE 的 COW 标志
+    return (void*)pa;
+  }
+
+  // 如果存在多个引用，则需要分配新的物理页并拷贝旧页面内容
+  char *mem = kalloc();  // 分配物理内存
+  if (mem == 0) {
+    return 0;
+  }
+  memmove(mem, (void*)pa, PGSIZE);  // 拷贝旧页面内容
+
+  // 修改 va 的 mapping
+  *pte = PA2PTE(mem) | ((PTE_FLAGS(*pte) | PTE_W) & (~PTE_COW));
+  
+  // 将旧物理页的 ref count 减一
+  kfree((void*)pa);
+
+  return mem;
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -67,6 +115,22 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13 || r_scause() == 15) {  // page fault
+    uint64 va = r_stval();
+    // case 1：访问了非法空间
+    if (va >= p->sz) {
+      p->killed = 1;
+    }
+    // case 2：权限问题
+    else if (is_cowpage(p->pagetable, va) == 0) {
+      p->killed = 1;
+    }
+    // case 3: COW page
+    else {
+      if(handle_cow(p->pagetable, va) == 0) {
+        p->killed = 1;
+      }
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
