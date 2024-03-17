@@ -23,33 +23,54 @@
 #include "fs.h"
 #include "buf.h"
 
+#define N_BUCKETS 13   // buffer buckets 的数量
+
 struct {
   struct spinlock lock;
   struct buf buf[NBUF];
-
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
 } bcache;
+
+struct BcacheBucket {
+  struct spinlock lock;
+  struct buf head;
+} hash_table[N_BUCKETS];
 
 void
 binit(void)
 {
   struct buf *b;
-
-  initlock(&bcache.lock, "bcache");
-
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+  struct BcacheBucket *bucket;
+  // 初始化 hash table
+  for (int i = 0; i < N_BUCKETS; i++) {
+    bucket = hash_table + i;
+    initlock(&bucket->lock, "bcache.bucket");
+    bucket->head.prev = &bucket->head;
+    bucket->head.next = &bucket->head;
   }
+  // 初始化 bcache
+  initlock(&bcache.lock, "bcache");
+  for (b = bcache.buf; b < bcache.buf + NBUF; b++) {
+    b->tick = 0;
+    initsleeplock(&b->lock, "buffer");
+  }
+}
+
+// 在一个 buffer 中填入缓存块的信息
+void
+replace_buffer(struct buf* buffer, uint dev, uint blockno, uint tick) {
+  buffer->dev = dev;
+  buffer->blockno = blockno;
+  buffer->tick = tick;
+  buffer->valid = 0;  // 表示数据还未写入 buffer 的 data 字段中
+  buffer->refcnt = 1;
+}
+
+void
+bucket_add(struct BcacheBucket *bucket, struct buf *buffer) {
+  buffer->next = bucket->head.next;
+  bucket->head.next->prev = buffer;
+  bucket->head.next = buffer;
+  buffer->prev = &bucket->head;
 }
 
 // Look through buffer cache for block on device dev.
@@ -60,32 +81,67 @@ bget(uint dev, uint blockno)
 {
   struct buf *b;
 
+  int bucketNo = blockno % N_BUCKETS;  // 根据 blockno 计算 hash table 的 bucket 序号
+  struct BcacheBucket *bucket = hash_table + bucketNo;
+  acquire(&bucket->lock);
+  
+  // 检查这个 block 是否存在于 cache 中
+  for (b = bucket->head.next; b != &bucket->head; b = b->next) {  // 遍历这个 bucket 的链表
+    // 如果没找到：
+    if (b->dev != dev || b->blockno != blockno) {
+      continue;
+    }
+    // 如果找到了：
+    b->tick = ticks;
+    b->refcnt++;
+    release(&bucket->lock);
+    acquiresleep(&b->lock);
+    return b;
+  }
+
+  // 如果 bucket 中没有找到 cache，则需要从 kcache 中找一块未使用的 buffer
   acquire(&bcache.lock);
-
-  // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
-      b->refcnt++;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  struct buf* victim = 0;  // 根据 LRU 策略所决定淘汰的 buffer
+  for (b = bcache.buf; b < bcache.buf + NBUF; b++) {  // 遍历所有 buffer，寻找一个未使用的 buffer
+    // 如果 buffer 不能使用：
+    if (b->refcnt != 0) {
+      continue;
+    }
+    // 如果 buffer 可以使用，则根据时间戳来决定是否将它作为 victim
+    else {
+      if (victim == 0 || victim->tick > b->tick) {
+        victim = b;
+      }
     }
   }
 
-  // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
-    }
+  // 是否能够找到 victim?
+  if (victim == 0) {
+    panic("bget: no buffers");
   }
-  panic("bget: no buffers");
+
+  // 将 victim 的 buffer 中填入数据，并将其移动到 bucket 中
+  if (victim->tick == 0) {  // 如果 victim 还未加入到 hash table 中
+    replace_buffer(victim, dev, blockno, ticks);
+    bucket_add(bucket, victim);
+  } else if ((victim->blockno % N_BUCKETS) != bucketNo) {  // 如果 victim 之前所在的 bucket 与现在需要加入的 bucket 不同的话
+    struct BcacheBucket *old_bucket = &hash_table[victim->blockno % N_BUCKETS];
+    acquire(&old_bucket->lock);
+    replace_buffer(victim, dev, blockno, ticks);
+    victim->prev->next = victim->next;
+    victim->next->prev = victim->prev;
+    release(&old_bucket->lock);
+    bucket_add(bucket, victim);
+  } else {  // 如果 victim 之前就是在现在需要加入的 bucket 的话
+    replace_buffer(victim, dev, blockno, ticks);
+  }
+
+  // 释放掉相关的 lock
+  release(&bcache.lock);
+  release(&bucket->lock);
+  acquiresleep(&victim->lock);
+
+  return victim;
 }
 
 // Return a locked buf with the contents of the indicated block.
@@ -121,33 +177,26 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  struct BcacheBucket *bucket = &hash_table[b->blockno % N_BUCKETS];
+  acquire(&bucket->lock);
   b->refcnt--;
-  if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
-  
-  release(&bcache.lock);
+  release(&bucket->lock);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  struct BcacheBucket *bucket = &hash_table[b->blockno % N_BUCKETS];
+  acquire(&bucket->lock);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bucket->lock);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  struct BcacheBucket *bucket = &hash_table[b->blockno % N_BUCKETS];
+  acquire(&bucket->lock);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bucket->lock);
 }
 
 
