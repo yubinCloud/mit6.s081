@@ -380,13 +380,15 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  // 检查 bn 是否可以走直接索引
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0)
+    if((addr = ip->addrs[bn]) == 0)  // 如果发现 bn 的 block 还不存在，则 alloc 一个 block
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
   bn -= NDIRECT;
 
+  // 检查 bn 是否可以走一级间接索引
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0)
@@ -395,6 +397,33 @@ bmap(struct inode *ip, uint bn)
     a = (uint*)bp->data;
     if((addr = a[bn]) == 0){
       a[bn] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+  }
+  bn -= NINDIRECT;
+
+  // 检查 bn 是否可以走二级间接索引
+  if (bn < N_DOUBLE_INDIRECT) {
+    if ((addr = ip->addrs[NDIRECT + 1]) == 0) {
+      ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
+    }
+    // 先从一级间接索引中找
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    uint level1 = bn / NINDIRECT;  // 在一级索引目录中的 index
+    if ((addr = a[level1]) == 0) {
+      a[level1] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    // 再从二级间接索引中找
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    uint level2 = bn % NINDIRECT;  // 在二级索引目录中的 index
+    if ((addr = a[level2]) == 0) {
+      a[level2] = addr = balloc(ip->dev);
       log_write(bp);
     }
     brelse(bp);
@@ -430,6 +459,30 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // 释放二级间接索引目录下的 blocks
+  if (ip->addrs[NDIRECT + 1]) {
+    // 从直接索引中记录的指针，访问一级间接索引
+    struct buf *bp1 = bread(ip->dev, ip->addrs[NDIRECT + 1]);  // 一级间接索引的 block
+    uint *a1 = (uint*)bp1->data;
+    for(j = 0; j < NINDIRECT; j++) {  // 遍历一级间接索引的所有索引项
+      if (a1[j]) {
+        // 从一级间接索引中记录的指针，访问二级间接索引
+        struct buf *bp2 = bread(ip->dev, a1[j]); // 二级间接索引的 block
+        uint *a2 = (uint*)bp2->data;
+        for(int k = 0; k < NINDIRECT; k++) {  // 遍历二级间接索引的所有索引项
+          if (a2[k])
+            bfree(ip->dev, a2[k]);  // 释放这个 data block
+        }
+        brelse(bp2);
+        bfree(ip->dev, a1[j]);   // 释放二级间接索引的 block
+      }
+      //释放完了二阶指针块，
+    }
+    brelse(bp1); 
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]);  // 释放一级间接索引的 block
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;
