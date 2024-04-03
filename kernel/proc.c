@@ -134,6 +134,11 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // 初始化 p 的 vma pool
+  for (int i = 0; i < MAX_VMA_POOL; i++) {
+    p->vma_pool[i].used = 0;
+  }
+
   return p;
 }
 
@@ -296,6 +301,14 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for (int i = 0; i < MAX_VMA_POOL; i++) {
+    struct VMA* vma = p->vma_pool + i;
+    if (vma->used == 1) {
+      memmove(np->vma_pool + i, p->vma_pool + i, sizeof(struct VMA));
+      filedup(np->vma_pool[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,6 +363,18 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // 查看所有 vma 并释放之
+  struct VMA* vma;
+  for (int i = 0; i < MAX_VMA_POOL; i++) {
+    vma = p->vma_pool + i;
+    if (vma->used != 1) {
+      continue;
+    }
+    if (munmap_impl(vma->addr, vma->length) != 0) {
+      panic("exit munmap");
     }
   }
 
@@ -519,7 +544,6 @@ sched(void)
     panic("sched running");
   if(intr_get())
     panic("sched interruptible");
-
   intena = mycpu()->intena;
   swtch(&p->context, &mycpu()->context);
   mycpu()->intena = intena;
@@ -700,4 +724,26 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+
+struct VMA* get_vma_pool() {
+    return myproc()->vma_pool;    
+}
+
+uint64 vma_alloc() {
+    struct VMA* vma_pool = get_vma_pool();
+    for (int i = 0; i < MAX_VMA_POOL; i++) {
+        struct VMA *vma = vma_pool + i;
+        if (vma->used == 1) {
+            continue;
+        }
+        vma->used = 1;
+        return (uint64) vma;
+    }
+    return 0;
+}
+
+void vma_free(uint64 vma) {
+    ((struct VMA*) vma)->used = 0;
 }
